@@ -638,6 +638,237 @@ def sync_notion_context() -> str:
         return json.dumps({"error": error_msg})
 
 
+@mcp.tool()
+def extract_tax_documents() -> str:
+    """
+    Run the notion-rules tax document OCR pipeline.
+
+    Processes tax documents through OCR extraction and updates Notion database
+    with extracted information (dates, amounts, categories).
+
+    Returns:
+        Result of the extraction operation.
+    """
+    start_time = datetime.now()
+
+    try:
+        repo = REPOS["notion_rules"]
+        if not repo.exists():
+            error_msg = f"notion-rules not found at {repo}"
+            log_operation("extract_tax_documents", {}, error_msg, False)
+            return json.dumps({"error": error_msg})
+
+        # Find the main extraction script
+        extract_script = repo / "tax-years/extract_tax_data.py"
+        if not extract_script.exists():
+            extract_script = repo / "extract.py"
+
+        if not extract_script.exists():
+            error_msg = "Tax extraction script not found in notion-rules"
+            log_operation("extract_tax_documents", {}, error_msg, False)
+            return json.dumps({"error": error_msg})
+
+        success, stdout, stderr = run_command(
+            [sys.executable, str(extract_script)],
+            cwd=repo,
+            timeout=600  # 10 minutes for OCR processing
+        )
+
+        result = {
+            "success": success,
+            "output": stdout[-2000:] if stdout else None,
+            "error": stderr if not success else None,
+        }
+
+        # Check checkpoint for results
+        checkpoint = repo / "tax-years/data/processing_checkpoint.json"
+        if checkpoint.exists():
+            try:
+                with open(checkpoint) as f:
+                    data = json.load(f)
+                    result["processed"] = len(data.get("results", []))
+                    result["needs_review"] = sum(
+                        1 for r in data.get("results", [])
+                        if r.get("needs_review", False)
+                    )
+            except Exception:
+                pass
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("extract_tax_documents", {}, "success" if success else stderr, success, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error extracting tax documents: {str(e)}"
+        log_operation("extract_tax_documents", {}, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+@mcp.tool()
+def get_financial_summary(days: int = 30) -> str:
+    """
+    Get financial summary from Monarch Money.
+
+    Note: This tool provides instructions for using Monarch Money MCP directly,
+    as financial data requires the specialized Monarch MCP server.
+
+    Args:
+        days: Number of days to summarize (default: 30)
+
+    Returns:
+        Instructions for accessing Monarch Money data.
+    """
+    start_time = datetime.now()
+    params = {"days": days}
+
+    try:
+        # Check Monarch session status
+        session_status = "unknown"
+        if MONARCH_SESSION.exists():
+            mtime = get_file_mtime(MONARCH_SESSION)
+            if mtime:
+                age_days = (datetime.now() - mtime).days
+                session_status = "connected" if age_days <= 7 else "stale"
+        else:
+            session_status = "not_authenticated"
+
+        result = {
+            "monarch_status": session_status,
+            "instructions": """
+To get financial data, use the Monarch Money MCP server tools directly:
+
+1. get_accounts() - List all financial accounts
+2. get_transactions(limit=100, start_date="YYYY-MM-DD") - Get recent transactions
+3. get_budgets() - View budget information
+4. get_cashflow(start_date="YYYY-MM-DD") - Get cashflow analysis
+
+If session is stale, run: python ~/Documents/monarch-mcp-server/login_setup.py
+            """.strip(),
+            "quick_commands": [
+                "get_accounts()",
+                f"get_transactions(limit=100)",
+                "get_budgets()",
+                "get_cashflow()",
+            ]
+        }
+
+        if session_status == "not_authenticated":
+            result["attention"] = "Monarch Money not authenticated. Run login_setup.py first."
+        elif session_status == "stale":
+            result["attention"] = "Monarch session may be stale. Consider re-authenticating."
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("get_financial_summary", params, session_status, True, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error getting financial summary: {str(e)}"
+        log_operation("get_financial_summary", params, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+@mcp.tool()
+def run_reconciliation() -> str:
+    """
+    Verify all automation systems are in sync.
+
+    Performs comprehensive checks:
+    - All repos exist and are on main branch
+    - No uncommitted changes in repos
+    - All LaunchAgents are healthy
+    - Session files are valid
+    - No stale data
+
+    Returns:
+        Reconciliation report with any issues found.
+    """
+    start_time = datetime.now()
+
+    try:
+        issues = []
+        checks = []
+
+        # Check all repos
+        for name, path in REPOS.items():
+            repo_check = {"repo": name, "path": str(path), "status": "unknown", "issues": []}
+
+            if not path.exists():
+                repo_check["status"] = "missing"
+                repo_check["issues"].append("Repository not found")
+                issues.append(f"{name}: Repository not found")
+            else:
+                # Check if it's a git repo
+                git_dir = path / ".git"
+                if git_dir.exists():
+                    # Check for uncommitted changes
+                    success, stdout, _ = run_command(
+                        ["git", "status", "--porcelain"],
+                        cwd=path,
+                        timeout=10
+                    )
+                    if success and stdout.strip():
+                        repo_check["status"] = "dirty"
+                        repo_check["issues"].append("Uncommitted changes")
+                        issues.append(f"{name}: Has uncommitted changes")
+                    else:
+                        repo_check["status"] = "clean"
+
+                    # Check current branch
+                    success, stdout, _ = run_command(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=path,
+                        timeout=10
+                    )
+                    if success:
+                        branch = stdout.strip()
+                        repo_check["branch"] = branch
+                        if branch != "main":
+                            repo_check["issues"].append(f"Not on main branch (on {branch})")
+                            issues.append(f"{name}: On branch {branch}, not main")
+                else:
+                    repo_check["status"] = "not_git"
+                    repo_check["issues"].append("Not a git repository")
+
+            checks.append(repo_check)
+
+        # Check LaunchAgents
+        for name, label in LAUNCHAGENTS.items():
+            loaded, pid = get_launchctl_status(label)
+            if not loaded:
+                issues.append(f"LaunchAgent {name}: Not loaded")
+
+        # Check Monarch session
+        if MONARCH_SESSION.exists():
+            mtime = get_file_mtime(MONARCH_SESSION)
+            if mtime:
+                age_days = (datetime.now() - mtime).days
+                if age_days > 7:
+                    issues.append("Monarch session is stale (>7 days old)")
+
+        result = {
+            "timestamp": datetime.now().isoformat(),
+            "repos": checks,
+            "issues": issues,
+            "status": "healthy" if not issues else "issues_found",
+            "issue_count": len(issues),
+        }
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("run_reconciliation", {}, f"{len(issues)} issues", len(issues) == 0, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error running reconciliation: {str(e)}"
+        log_operation("run_reconciliation", {}, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
 # =============================================================================
 # Server Entry Point
 # =============================================================================
