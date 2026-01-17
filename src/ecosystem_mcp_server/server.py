@@ -943,7 +943,7 @@ def process_automation_request(request_id: str) -> str:
         notion_control.update_request_status(request_id, notion_control.STATUS_RUNNING)
 
         # Execute
-        success, result_msg, error_msg = notion_control.execute_request(request)
+        success, result_msg = notion_control.execute_request(request)
 
         # Update status
         if success:
@@ -956,19 +956,18 @@ def process_automation_request(request_id: str) -> str:
             notion_control.update_request_status(
                 request_id,
                 notion_control.STATUS_FAILED,
-                error=error_msg
+                result=result_msg
             )
 
         result = {
             "request": request,
             "success": success,
             "result": result_msg,
-            "error": error_msg,
         }
 
         # Log operation
         duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-        log_operation("process_automation_request", params, result_msg or error_msg, success, duration_ms)
+        log_operation("process_automation_request", params, result_msg, success, duration_ms)
 
         return json.dumps(result, indent=2, default=str)
 
@@ -1063,6 +1062,58 @@ The database should have these properties:
     except Exception as e:
         error_msg = f"Error setting up control plane: {str(e)}"
         log_operation("setup_notion_control_plane", params, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+# =============================================================================
+# Daily Briefing
+# =============================================================================
+
+@mcp.tool()
+def get_daily_briefing(include_financial: bool = True, include_calendar: bool = True) -> str:
+    """
+    Generate a comprehensive daily briefing.
+
+    Combines information from all ecosystem systems into a single morning summary:
+    - Ecosystem status (all 5 systems)
+    - Pending documents needing attention
+    - Financial summary from Monarch Money (if available)
+    - Automation requests pending in Notion
+    - Calendar events (if icalBuddy is installed)
+
+    Args:
+        include_financial: Include Monarch Money data (default: True)
+        include_calendar: Include calendar events (default: True)
+
+    Returns:
+        Formatted briefing as markdown text.
+    """
+    start_time = datetime.now()
+    params = {"include_financial": include_financial, "include_calendar": include_calendar}
+
+    try:
+        from . import daily_briefing
+
+        briefing = daily_briefing.generate_briefing(
+            include_financial=include_financial,
+            include_calendar=include_calendar,
+        )
+
+        # Return both formatted text and raw data
+        result = {
+            "formatted": daily_briefing.format_briefing_text(briefing),
+            "data": briefing,
+        }
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("get_daily_briefing", params, briefing.get("summary", ""), True, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error generating briefing: {str(e)}"
+        log_operation("get_daily_briefing", params, error_msg, False)
         return json.dumps({"error": error_msg})
 
 
