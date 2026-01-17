@@ -5,14 +5,13 @@ This module enables automation requests from anywhere (phone, tablet, etc.)
 by polling a Notion database for queued requests and executing them.
 
 Database Schema (Automation Requests):
-- Request (title): What to do
-- Type (select): organize, extract, sync, reconcile, custom
-- Target (select): tax, media, all, treehouse, yourco, tap, personal
+- Name (title): Description of what to do
+- Command (rich_text): organize, extract, sync, reconcile, custom
+- Arguments (rich_text): Command arguments (e.g., tax, media, all)
 - Status (select): queued, running, done, failed
-- Created (date): Auto timestamp
-- Completed (date): When finished
-- Result (text): Summary of what happened
-- Error (text): If failed, why
+- Created (created_time): Auto timestamp by Notion
+- Processed (date): When finished
+- Result (rich_text): Summary of what happened (including errors)
 """
 
 import json
@@ -37,26 +36,6 @@ NOTION_TOKEN_ENV = "NOTION_TOKEN"
 
 # Database ID will be stored after creation
 CONFIG_FILE = Path.home() / "Library/Application Support/ecosystem-mcp-server/notion_config.json"
-
-# Request types and their handlers
-REQUEST_TYPES = {
-    "organize": "Handle file organization requests",
-    "extract": "Handle tax document extraction",
-    "sync": "Handle context sync requests",
-    "reconcile": "Handle reconciliation checks",
-    "custom": "Custom/freeform requests",
-}
-
-# Targets for requests
-REQUEST_TARGETS = {
-    "tax": "Tax PDF documents",
-    "media": "Media files (photos, videos, audio)",
-    "all": "All file types",
-    "treehouse": "Treehouse LLC workspace",
-    "yourco": "YourCo Consulting workspace",
-    "tap": "Tap workspace",
-    "personal": "Personal workspace",
-}
 
 # Status values
 STATUS_QUEUED = "queued"
@@ -86,7 +65,8 @@ def get_notion_client() -> Optional[Client]:
         logger.error(f"Notion token not found. Set {NOTION_TOKEN_ENV} environment variable.")
         return None
 
-    return Client(auth=token)
+    # Use older API version that supports databases.query
+    return Client(auth=token, notion_version="2022-06-28")
 
 
 def load_config() -> Dict[str, Any]:
@@ -112,6 +92,9 @@ def create_automation_requests_database(parent_page_id: str) -> Optional[str]:
     """
     Create the Automation Requests database in Notion.
 
+    Note: This creates a new database. If you already have a database,
+    use --set-db to configure its ID instead.
+
     Args:
         parent_page_id: The page ID where the database should be created
 
@@ -123,37 +106,19 @@ def create_automation_requests_database(parent_page_id: str) -> Optional[str]:
         return None
 
     try:
-        # Create the database with required schema
+        # Create the database with schema matching existing database
         response = client.databases.create(
             parent={"type": "page_id", "page_id": parent_page_id},
             title=[{"type": "text", "text": {"content": "Automation Requests"}}],
             properties={
-                "Request": {
+                "Name": {
                     "title": {}
                 },
-                "Type": {
-                    "select": {
-                        "options": [
-                            {"name": "organize", "color": "blue"},
-                            {"name": "extract", "color": "green"},
-                            {"name": "sync", "color": "purple"},
-                            {"name": "reconcile", "color": "orange"},
-                            {"name": "custom", "color": "gray"},
-                        ]
-                    }
+                "Command": {
+                    "rich_text": {}
                 },
-                "Target": {
-                    "select": {
-                        "options": [
-                            {"name": "tax", "color": "red"},
-                            {"name": "media", "color": "pink"},
-                            {"name": "all", "color": "blue"},
-                            {"name": "treehouse", "color": "green"},
-                            {"name": "yourco", "color": "purple"},
-                            {"name": "tap", "color": "orange"},
-                            {"name": "personal", "color": "yellow"},
-                        ]
-                    }
+                "Arguments": {
+                    "rich_text": {}
                 },
                 "Status": {
                     "select": {
@@ -165,16 +130,10 @@ def create_automation_requests_database(parent_page_id: str) -> Optional[str]:
                         ]
                     }
                 },
-                "Created": {
-                    "date": {}
-                },
-                "Completed": {
+                "Processed": {
                     "date": {}
                 },
                 "Result": {
-                    "rich_text": {}
-                },
-                "Error": {
                     "rich_text": {}
                 },
             }
@@ -217,15 +176,19 @@ def get_pending_requests() -> List[Dict[str, Any]]:
         return []
 
     try:
-        response = client.databases.query(
-            database_id=db_id,
-            filter={
-                "property": "Status",
-                "select": {"equals": STATUS_QUEUED}
-            },
-            sorts=[
-                {"property": "Created", "direction": "ascending"}
-            ]
+        # Use direct request since library doesn't expose databases.query
+        response = client.request(
+            path=f"databases/{db_id}/query",
+            method="POST",
+            body={
+                "filter": {
+                    "property": "Status",
+                    "select": {"equals": STATUS_QUEUED}
+                },
+                "sorts": [
+                    {"property": "Created", "direction": "ascending"}  # created_time type
+                ]
+            }
         )
 
         requests = []
@@ -246,29 +209,29 @@ def parse_request_page(page: Dict) -> Optional[Dict[str, Any]]:
     try:
         props = page.get("properties", {})
 
-        # Extract title
-        title_prop = props.get("Request", {}).get("title", [])
-        title = title_prop[0]["text"]["content"] if title_prop else ""
+        # Extract title (Name property)
+        title_prop = props.get("Name", {}).get("title", [])
+        name = title_prop[0]["text"]["content"] if title_prop else ""
 
-        # Extract select values
-        type_prop = props.get("Type", {}).get("select")
-        type_val = type_prop["name"] if type_prop else None
+        # Extract rich_text values (Command and Arguments)
+        command_prop = props.get("Command", {}).get("rich_text", [])
+        command = command_prop[0]["text"]["content"] if command_prop else ""
 
-        target_prop = props.get("Target", {}).get("select")
-        target_val = target_prop["name"] if target_prop else None
+        args_prop = props.get("Arguments", {}).get("rich_text", [])
+        arguments = args_prop[0]["text"]["content"] if args_prop else ""
 
+        # Extract status
         status_prop = props.get("Status", {}).get("select")
         status_val = status_prop["name"] if status_prop else None
 
-        # Extract dates
-        created_prop = props.get("Created", {}).get("date")
-        created_val = created_prop["start"] if created_prop else None
+        # Extract created_time
+        created_val = props.get("Created", {}).get("created_time")
 
         return {
             "id": page["id"],
-            "request": title,
-            "type": type_val,
-            "target": target_val,
+            "name": name,
+            "command": command.strip().lower(),
+            "arguments": arguments.strip(),
             "status": status_val,
             "created": created_val,
             "url": page.get("url"),
@@ -282,7 +245,6 @@ def update_request_status(
     request_id: str,
     status: str,
     result: Optional[str] = None,
-    error: Optional[str] = None,
 ) -> bool:
     """
     Update the status of a request.
@@ -290,8 +252,7 @@ def update_request_status(
     Args:
         request_id: Notion page ID
         status: New status (running, done, failed)
-        result: Result summary (for done status)
-        error: Error message (for failed status)
+        result: Result summary or error message
 
     Returns:
         True if successful
@@ -306,18 +267,13 @@ def update_request_status(
         }
 
         if status in [STATUS_DONE, STATUS_FAILED]:
-            properties["Completed"] = {
+            properties["Processed"] = {
                 "date": {"start": datetime.now().isoformat()}
             }
 
         if result:
             properties["Result"] = {
                 "rich_text": [{"text": {"content": result[:2000]}}]  # Notion limit
-            }
-
-        if error:
-            properties["Error"] = {
-                "rich_text": [{"text": {"content": error[:2000]}}]
             }
 
         client.pages.update(page_id=request_id, properties=properties)
@@ -337,34 +293,34 @@ def execute_request(request: Dict[str, Any]) -> tuple:
     Execute an automation request.
 
     Args:
-        request: Request dict with type, target, etc.
+        request: Request dict with command, arguments, etc.
 
     Returns:
-        (success, result_message, error_message)
+        (success, result_message)
     """
-    req_type = request.get("type")
-    target = request.get("target")
-    req_text = request.get("request", "")
+    command = request.get("command", "")
+    arguments = request.get("arguments", "")
+    name = request.get("name", "")
 
-    logger.info(f"Executing request: {req_type} / {target} - {req_text}")
+    logger.info(f"Executing: {name} (command={command}, args={arguments})")
 
     try:
-        if req_type == "organize":
-            return execute_organize(target)
-        elif req_type == "extract":
+        if command == "organize":
+            return execute_organize(arguments)
+        elif command == "extract":
             return execute_extract()
-        elif req_type == "sync":
-            return execute_sync(target)
-        elif req_type == "reconcile":
+        elif command == "sync":
+            return execute_sync(arguments)
+        elif command == "reconcile":
             return execute_reconcile()
-        elif req_type == "custom":
-            return execute_custom(req_text, target)
+        elif command == "custom" or not command:
+            return execute_custom(name, arguments)
         else:
-            return False, None, f"Unknown request type: {req_type}"
+            return False, f"Unknown command: {command}"
 
     except Exception as e:
         logger.error(f"Request execution failed: {e}")
-        return False, None, str(e)
+        return False, f"Error: {e}"
 
 
 def execute_organize(target: str) -> tuple:
@@ -381,10 +337,10 @@ def execute_organize(target: str) -> tuple:
 
     data = json.loads(result)
     if "error" in data:
-        return False, None, data["error"]
+        return False, f"Error: {data['error']}"
 
     remaining = data.get("remaining", {})
-    return True, f"Organized files. Remaining: {remaining.get('pdfs', 0)} PDFs, {remaining.get('media', 0)} media", None
+    return True, f"Organized files. Remaining: {remaining.get('pdfs', 0)} PDFs, {remaining.get('media', 0)} media"
 
 
 def execute_extract() -> tuple:
@@ -395,14 +351,14 @@ def execute_extract() -> tuple:
     data = json.loads(result)
 
     if "error" in data:
-        return False, None, data["error"]
+        return False, f"Error: {data['error']}"
 
     if data.get("success"):
         processed = data.get("processed", 0)
         needs_review = data.get("needs_review", 0)
-        return True, f"Extracted {processed} documents. {needs_review} need review.", None
+        return True, f"Extracted {processed} documents. {needs_review} need review."
     else:
-        return False, None, data.get("error", "Extraction failed")
+        return False, f"Error: {data.get('error', 'Extraction failed')}"
 
 
 def execute_sync(target: str) -> tuple:
@@ -413,12 +369,12 @@ def execute_sync(target: str) -> tuple:
     data = json.loads(result)
 
     if "error" in data:
-        return False, None, data["error"]
+        return False, f"Error: {data['error']}"
 
     if data.get("success"):
-        return True, f"Context synced. Last sync: {data.get('last_sync', 'unknown')}", None
+        return True, f"Context synced. Last sync: {data.get('last_sync', 'unknown')}"
     else:
-        return False, None, data.get("error", "Sync failed")
+        return False, f"Error: {data.get('error', 'Sync failed')}"
 
 
 def execute_reconcile() -> tuple:
@@ -429,23 +385,22 @@ def execute_reconcile() -> tuple:
     data = json.loads(result)
 
     if "error" in data:
-        return False, None, data["error"]
+        return False, f"Error: {data['error']}"
 
     issue_count = data.get("issue_count", 0)
-    status = data.get("status", "unknown")
 
     if issue_count == 0:
-        return True, "All systems healthy. No issues found.", None
+        return True, "All systems healthy. No issues found."
     else:
         issues = data.get("issues", [])
-        return True, f"Found {issue_count} issues: {'; '.join(issues[:3])}", None
+        return True, f"Found {issue_count} issues: {'; '.join(issues[:3])}"
 
 
-def execute_custom(request_text: str, target: str) -> tuple:
+def execute_custom(request_text: str, arguments: str) -> tuple:
     """Execute custom request (logs for manual handling)."""
     # Custom requests are logged but not auto-executed
     # They can be picked up by Claude or handled manually
-    return True, f"Custom request logged: '{request_text}' (target: {target}). Requires manual handling.", None
+    return True, f"Custom request logged: '{request_text}' (args: {arguments}). Requires manual handling."
 
 
 # =============================================================================
@@ -471,21 +426,21 @@ def poll_and_process(once: bool = False, interval: int = 60):
 
                 for req in requests:
                     req_id = req["id"]
-                    logger.info(f"Processing: {req['request']} ({req['type']}/{req['target']})")
+                    logger.info(f"Processing: {req['name']} (cmd={req['command']}, args={req['arguments']})")
 
                     # Mark as running
                     update_request_status(req_id, STATUS_RUNNING)
 
                     # Execute
-                    success, result, error = execute_request(req)
+                    success, result = execute_request(req)
 
                     # Update status
                     if success:
                         update_request_status(req_id, STATUS_DONE, result=result)
                         logger.info(f"Completed: {result}")
                     else:
-                        update_request_status(req_id, STATUS_FAILED, error=error)
-                        logger.error(f"Failed: {error}")
+                        update_request_status(req_id, STATUS_FAILED, result=result)
+                        logger.error(f"Failed: {result}")
 
             if once:
                 break
