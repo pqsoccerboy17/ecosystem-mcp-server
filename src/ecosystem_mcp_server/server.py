@@ -870,6 +870,203 @@ def run_reconciliation() -> str:
 
 
 # =============================================================================
+# Notion Control Plane Tools
+# =============================================================================
+
+@mcp.tool()
+def get_pending_requests() -> str:
+    """
+    Get pending automation requests from Notion Control Plane.
+
+    Returns queued requests that are waiting to be processed.
+    These requests can be created from any device via the Notion app.
+
+    Returns:
+        List of pending requests with their details.
+    """
+    start_time = datetime.now()
+
+    try:
+        from . import notion_control
+
+        requests = notion_control.get_pending_requests()
+
+        result = {
+            "pending_count": len(requests),
+            "requests": requests,
+        }
+
+        if not requests:
+            result["message"] = "No pending requests"
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("get_pending_requests", {}, f"{len(requests)} pending", True, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error getting pending requests: {str(e)}"
+        log_operation("get_pending_requests", {}, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+@mcp.tool()
+def process_automation_request(request_id: str) -> str:
+    """
+    Manually process a specific automation request from Notion.
+
+    Args:
+        request_id: The Notion page ID of the request to process
+
+    Returns:
+        Result of processing the request.
+    """
+    start_time = datetime.now()
+    params = {"request_id": request_id}
+
+    try:
+        from . import notion_control
+
+        # Get the request details
+        client = notion_control.get_notion_client()
+        if not client:
+            return json.dumps({"error": "Notion client not available"})
+
+        page = client.pages.retrieve(page_id=request_id)
+        request = notion_control.parse_request_page(page)
+
+        if not request:
+            return json.dumps({"error": "Failed to parse request"})
+
+        # Mark as running
+        notion_control.update_request_status(request_id, notion_control.STATUS_RUNNING)
+
+        # Execute
+        success, result_msg, error_msg = notion_control.execute_request(request)
+
+        # Update status
+        if success:
+            notion_control.update_request_status(
+                request_id,
+                notion_control.STATUS_DONE,
+                result=result_msg
+            )
+        else:
+            notion_control.update_request_status(
+                request_id,
+                notion_control.STATUS_FAILED,
+                error=error_msg
+            )
+
+        result = {
+            "request": request,
+            "success": success,
+            "result": result_msg,
+            "error": error_msg,
+        }
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("process_automation_request", params, result_msg or error_msg, success, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error processing request: {str(e)}"
+        log_operation("process_automation_request", params, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+@mcp.tool()
+def setup_notion_control_plane(parent_page_id: Optional[str] = None, database_id: Optional[str] = None) -> str:
+    """
+    Setup or configure the Notion Control Plane.
+
+    Either creates a new Automation Requests database or configures an existing one.
+
+    Args:
+        parent_page_id: If provided, creates a new database under this page
+        database_id: If provided, uses this existing database ID
+
+    Returns:
+        Setup result with database ID.
+    """
+    start_time = datetime.now()
+    params = {"parent_page_id": parent_page_id, "database_id": database_id}
+
+    try:
+        from . import notion_control
+
+        if database_id:
+            # Just save the database ID
+            config = notion_control.load_config()
+            config["automation_requests_db_id"] = database_id
+            notion_control.save_config(config)
+
+            result = {
+                "success": True,
+                "message": "Database ID configured",
+                "database_id": database_id,
+            }
+
+        elif parent_page_id:
+            # Create a new database
+            db_id = notion_control.create_automation_requests_database(parent_page_id)
+            if db_id:
+                result = {
+                    "success": True,
+                    "message": "Database created successfully",
+                    "database_id": db_id,
+                }
+            else:
+                result = {
+                    "success": False,
+                    "error": "Failed to create database. Check Notion token and permissions.",
+                }
+
+        else:
+            # Return current config
+            config = notion_control.load_config()
+            db_id = config.get("automation_requests_db_id")
+
+            result = {
+                "configured": bool(db_id),
+                "database_id": db_id,
+                "instructions": """
+To setup Notion Control Plane:
+
+1. Create database under existing page:
+   setup_notion_control_plane(parent_page_id="your-page-id")
+
+2. Or use existing database:
+   setup_notion_control_plane(database_id="your-db-id")
+
+The database should have these properties:
+- Request (title)
+- Type (select): organize, extract, sync, reconcile, custom
+- Target (select): tax, media, all, treehouse, yourco, tap, personal
+- Status (select): queued, running, done, failed
+- Created (date)
+- Completed (date)
+- Result (rich_text)
+- Error (rich_text)
+                """.strip()
+            }
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("setup_notion_control_plane", params, str(result.get("database_id")), result.get("success", True), duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error setting up control plane: {str(e)}"
+        log_operation("setup_notion_control_plane", params, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+# =============================================================================
 # Server Entry Point
 # =============================================================================
 
