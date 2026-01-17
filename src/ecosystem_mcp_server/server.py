@@ -492,6 +492,152 @@ def get_automation_history(limit: int = 20) -> str:
         return json.dumps({"error": f"Failed to get history: {str(e)}"})
 
 
+@mcp.tool()
+def organize_downloads(file_type: str = "all", dry_run: bool = False) -> str:
+    """
+    Trigger file organization from Downloads folder.
+
+    Args:
+        file_type: Type of files to organize - "pdf", "media", or "all" (default: "all")
+        dry_run: If True, preview what would be organized without moving files
+
+    Returns:
+        Result of the organization operation including files moved.
+    """
+    start_time = datetime.now()
+    params = {"file_type": file_type, "dry_run": dry_run}
+
+    try:
+        repo = REPOS["downloads_organizer"]
+        if not repo.exists():
+            error_msg = f"downloads-organizer not found at {repo}"
+            log_operation("organize_downloads", params, error_msg, False)
+            return json.dumps({"error": error_msg})
+
+        results = {
+            "file_type": file_type,
+            "dry_run": dry_run,
+            "pdf": None,
+            "media": None,
+        }
+
+        # Run PDF organizer
+        if file_type in ["pdf", "all"]:
+            cmd = [sys.executable, "-m", "downloads_organizer", "pdf"]
+            if dry_run:
+                cmd.append("--dry-run")
+            else:
+                cmd.append("--yes")
+
+            success, stdout, stderr = run_command(cmd, cwd=repo / "src", timeout=300)
+            results["pdf"] = {
+                "success": success,
+                "output": stdout[-2000:] if stdout else None,  # Last 2000 chars
+                "error": stderr if not success else None,
+            }
+
+        # Run media organizer
+        if file_type in ["media", "all"]:
+            cmd = [sys.executable, "-m", "downloads_organizer", "media"]
+            if dry_run:
+                cmd.append("--dry-run")
+            else:
+                cmd.append("--yes")
+
+            success, stdout, stderr = run_command(cmd, cwd=repo / "src", timeout=600)
+            results["media"] = {
+                "success": success,
+                "output": stdout[-2000:] if stdout else None,
+                "error": stderr if not success else None,
+            }
+
+        # Check remaining files
+        results["remaining"] = {
+            "pdfs": count_files_in_downloads(["pdf"]),
+            "media": count_files_in_downloads(["jpg", "jpeg", "png", "heic", "mov", "mp4", "mp3"]),
+        }
+
+        # Determine overall success
+        overall_success = True
+        if results["pdf"] and not results["pdf"]["success"]:
+            overall_success = False
+        if results["media"] and not results["media"]["success"]:
+            overall_success = False
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("organize_downloads", params, json.dumps(results["remaining"]), overall_success, duration_ms)
+
+        return json.dumps(results, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error organizing downloads: {str(e)}"
+        log_operation("organize_downloads", params, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+@mcp.tool()
+def sync_notion_context() -> str:
+    """
+    Trigger treehouse-context-sync to sync Notion context to repositories.
+
+    Syncs the latest Notion database content to the treehouse-context-sync repo,
+    making it available for Claude Code sessions.
+
+    Returns:
+        Result of the sync operation.
+    """
+    start_time = datetime.now()
+
+    try:
+        repo = REPOS["context_sync"]
+        if not repo.exists():
+            error_msg = f"treehouse-context-sync not found at {repo}"
+            log_operation("sync_notion_context", {}, error_msg, False)
+            return json.dumps({"error": error_msg})
+
+        # Run the sync script
+        sync_script = repo / "sync.py"
+        if not sync_script.exists():
+            # Try alternative locations
+            sync_script = repo / "src/sync.py"
+
+        if not sync_script.exists():
+            error_msg = "sync.py not found in treehouse-context-sync"
+            log_operation("sync_notion_context", {}, error_msg, False)
+            return json.dumps({"error": error_msg})
+
+        success, stdout, stderr = run_command(
+            [sys.executable, str(sync_script)],
+            cwd=repo,
+            timeout=300
+        )
+
+        result = {
+            "success": success,
+            "output": stdout[-2000:] if stdout else None,
+            "error": stderr if not success else None,
+        }
+
+        # Check last sync time
+        changelog = repo / "docs/context/CHANGELOG.md"
+        if changelog.exists():
+            mtime = get_file_mtime(changelog)
+            if mtime:
+                result["last_sync"] = mtime.isoformat()
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("sync_notion_context", {}, "success" if success else stderr, success, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error syncing context: {str(e)}"
+        log_operation("sync_notion_context", {}, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
 # =============================================================================
 # Server Entry Point
 # =============================================================================
