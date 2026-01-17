@@ -224,6 +224,8 @@ def get_calendar_events(days: int = 1) -> Dict[str, Any]:
     Returns:
         Dict with upcoming events.
     """
+    import re
+
     try:
         # Check if icalBuddy is installed
         result = subprocess.run(
@@ -240,15 +242,14 @@ def get_calendar_events(days: int = 1) -> Dict[str, Any]:
             }
 
         # Get events for today and upcoming days
+        # Use eventsToday+N syntax (N=0 means just today)
         result = subprocess.run(
             [
                 "icalBuddy",
-                "-f",  # Format output
                 "-nc",  # No calendar names
                 "-nrd",  # No relative dates
-                "-ea",  # Exclude all-day events from separate section
                 "-n",  # Include only unfinished events
-                f"eventsFrom:today to:today+{days}",
+                f"eventsToday+{days - 1}",
             ],
             capture_output=True,
             text=True,
@@ -259,19 +260,25 @@ def get_calendar_events(days: int = 1) -> Dict[str, Any]:
             events = []
             current_event = None
 
-            for line in result.stdout.strip().split("\n"):
-                line = line.strip()
-                if not line:
+            # Remove ANSI escape codes from output
+            clean_output = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout)
+
+            for line in clean_output.strip().split("\n"):
+                if not line.strip():
                     continue
 
-                # Parse icalBuddy output (format varies)
+                # Event titles start with bullet
                 if line.startswith("•") or line.startswith("*"):
                     if current_event:
                         events.append(current_event)
                     current_event = {"title": line.lstrip("•* ").strip()}
-                elif current_event and ":" in line[:10]:
-                    # Likely a time
-                    current_event["time"] = line.strip()
+                elif current_event and line.strip():
+                    stripped = line.strip()
+                    # Check if it looks like a time (contains AM/PM)
+                    if "PM" in stripped or "AM" in stripped:
+                        current_event["time"] = stripped
+                    elif stripped.startswith("attendees:"):
+                        pass  # Skip attendees line
 
             if current_event:
                 events.append(current_event)
