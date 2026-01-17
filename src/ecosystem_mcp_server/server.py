@@ -536,15 +536,15 @@ def organize_downloads(file_type: str = "all", dry_run: bool = False) -> str:
                 "error": stderr if not success else None,
             }
 
-        # Run media organizer
+        # Run media organizer (--no-audit for speed, skip recursive folder scan)
         if file_type in ["media", "all"]:
-            cmd = [sys.executable, "-m", "downloads_organizer", "media"]
+            cmd = [sys.executable, "-m", "downloads_organizer", "media", "--no-audit"]
             if dry_run:
                 cmd.append("--dry-run")
             else:
                 cmd.append("--yes")
 
-            success, stdout, stderr = run_command(cmd, cwd=repo / "src", timeout=600)
+            success, stdout, stderr = run_command(cmd, cwd=repo / "src", timeout=60)
             results["media"] = {
                 "success": success,
                 "output": stdout[-2000:] if stdout else None,
