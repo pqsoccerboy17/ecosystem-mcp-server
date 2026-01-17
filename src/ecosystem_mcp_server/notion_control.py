@@ -397,10 +397,34 @@ def execute_reconcile() -> tuple:
 
 
 def execute_custom(request_text: str, arguments: str) -> tuple:
-    """Execute custom request (logs for manual handling)."""
-    # Custom requests are logged but not auto-executed
-    # They can be picked up by Claude or handled manually
+    """
+    Execute custom request.
+
+    Supports known custom commands:
+    - daily-briefing: Generate and save a daily briefing to Notion
+
+    Unknown commands are logged for manual handling.
+    """
+    # Check for known custom commands
+    command = arguments.lower().strip() if arguments else ""
+
+    if command == "daily-briefing":
+        return execute_daily_briefing()
+
+    # Unknown custom requests are logged for manual handling
     return True, f"Custom request logged: '{request_text}' (args: {arguments}). Requires manual handling."
+
+
+def execute_daily_briefing() -> tuple:
+    """Generate and save a daily briefing to Notion."""
+    from . import daily_briefing
+
+    result = daily_briefing.save_briefing_to_notion()
+
+    if result.get("success"):
+        return True, f"Briefing saved: {result.get('title')}. {result.get('summary')}"
+    else:
+        return False, f"Failed to save briefing: {result.get('error')}"
 
 
 # =============================================================================

@@ -482,6 +482,260 @@ def format_briefing_text(briefing: Dict[str, Any]) -> str:
 
 
 # =============================================================================
+# Notion Integration
+# =============================================================================
+
+def save_briefing_to_notion(
+    briefing: Optional[Dict[str, Any]] = None,
+    include_financial: bool = True,
+    include_calendar: bool = True,
+) -> Dict[str, Any]:
+    """
+    Generate and save a daily briefing to Notion.
+
+    Creates a new page in the Daily Briefings database with the formatted
+    briefing content. Designed for easy reading on mobile devices.
+
+    Args:
+        briefing: Pre-generated briefing dict, or None to generate fresh
+        include_financial: Include Monarch Money data (if generating)
+        include_calendar: Include calendar events (if generating)
+
+    Returns:
+        Dict with success status, page_id, and url
+    """
+    from . import notion_control
+
+    try:
+        # Generate briefing if not provided
+        if briefing is None:
+            briefing = generate_briefing(
+                include_financial=include_financial,
+                include_calendar=include_calendar,
+            )
+
+        # Get Notion client
+        client = notion_control.get_notion_client()
+        if not client:
+            return {"success": False, "error": "Notion client not available"}
+
+        # Get database ID
+        config = notion_control.load_config()
+        db_id = config.get("daily_briefings_db_id")
+        if not db_id:
+            return {"success": False, "error": "Daily Briefings database not configured"}
+
+        # Create the page
+        today = datetime.now()
+        title = f"Daily Briefing - {today.strftime('%b %d, %Y')}"
+
+        # Use "Name" as title property (default for Notion databases)
+        # All content goes in the page body for better mobile reading
+        response = client.pages.create(
+            parent={"database_id": db_id},
+            properties={
+                "Name": {
+                    "title": [{"text": {"content": title}}]
+                },
+            },
+            # Add full content as page body for easier reading
+            children=_create_notion_blocks(briefing),
+        )
+
+        page_id = response["id"]
+        url = response.get("url", "")
+
+        logger.info(f"Saved briefing to Notion: {page_id}")
+
+        return {
+            "success": True,
+            "page_id": page_id,
+            "url": url,
+            "title": title,
+            "summary": briefing.get("summary", ""),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to save briefing to Notion: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def _format_briefing_for_notion(briefing: Dict[str, Any]) -> str:
+    """Format briefing as a short summary for the Content property."""
+    parts = [briefing.get("summary", "")]
+
+    cal = briefing.get("calendar", {})
+    if cal.get("available") and cal.get("event_count", 0) > 0:
+        events = cal.get("events", [])[:3]
+        event_strs = [e.get("title", "")[:30] for e in events]
+        parts.append(f"Events: {', '.join(event_strs)}")
+
+    return " | ".join(parts)
+
+
+def _create_notion_blocks(briefing: Dict[str, Any]) -> List[Dict]:
+    """Create Notion blocks for the full briefing content."""
+    blocks = []
+
+    # Greeting and summary
+    blocks.append({
+        "type": "heading_1",
+        "heading_1": {
+            "rich_text": [{"type": "text", "text": {"content": f"{briefing.get('greeting', 'Hello')}!"}}]
+        }
+    })
+
+    blocks.append({
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [{"type": "text", "text": {"content": briefing.get("summary", "")}}]
+        }
+    })
+
+    blocks.append({"type": "divider", "divider": {}})
+
+    # Calendar events (most important for mobile)
+    cal = briefing.get("calendar", {})
+    if cal.get("available"):
+        blocks.append({
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [{"type": "text", "text": {"content": "📅 Today's Schedule"}}]
+            }
+        })
+
+        if cal.get("event_count", 0) > 0:
+            for event in cal.get("events", [])[:10]:
+                time_str = event.get("time", "All day")
+                title = event.get("title", "Untitled")
+                blocks.append({
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {
+                        "rich_text": [
+                            {"type": "text", "text": {"content": f"{time_str}: "}, "annotations": {"bold": True}},
+                            {"type": "text", "text": {"content": title}},
+                        ]
+                    }
+                })
+        else:
+            blocks.append({
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": "No events scheduled today."}}]
+                }
+            })
+
+        blocks.append({"type": "divider", "divider": {}})
+
+    # Ecosystem status
+    blocks.append({
+        "type": "heading_2",
+        "heading_2": {
+            "rich_text": [{"type": "text", "text": {"content": "🔧 Ecosystem Status"}}]
+        }
+    })
+
+    eco = briefing.get("ecosystem", {})
+    if "error" not in eco:
+        healthy = eco.get("healthy", 0)
+        attention = eco.get("attention_needed", 0)
+
+        status_text = f"✅ {healthy} healthy"
+        if attention > 0:
+            status_text += f" | ⚠️ {attention} need attention"
+
+        blocks.append({
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": status_text}}]
+            }
+        })
+
+        for item in eco.get("attention_items", [])[:5]:
+            blocks.append({
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [{"type": "text", "text": {"content": item}}]
+                }
+            })
+
+    blocks.append({"type": "divider", "divider": {}})
+
+    # Pending documents
+    docs = briefing.get("documents", {})
+    if "error" not in docs:
+        total = docs.get("total_pending", 0)
+        if total > 0:
+            blocks.append({
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "📄 Pending Documents"}}]
+                }
+            })
+
+            blocks.append({
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {
+                        "content": f"PDFs: {docs.get('pending_pdfs', 0)} | Media: {docs.get('pending_media', 0)} | Review: {docs.get('needs_review', 0)}"
+                    }}]
+                }
+            })
+
+            blocks.append({"type": "divider", "divider": {}})
+
+    # Financial summary (if available)
+    fin = briefing.get("financial", {})
+    if "error" not in fin and fin.get("net_worth"):
+        blocks.append({
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [{"type": "text", "text": {"content": "💰 Financial Summary"}}]
+            }
+        })
+
+        blocks.append({
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {
+                    "content": f"Net Worth: ${fin.get('net_worth', 0):,.2f}"
+                }}]
+            }
+        })
+
+        blocks.append({
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {
+                    "content": f"MTD: +${fin.get('mtd_income', 0):,.2f} income | -${abs(fin.get('mtd_expenses', 0)):,.2f} expenses"
+                }}]
+            }
+        })
+
+    # Automation requests
+    auto = briefing.get("automation", {})
+    if "error" not in auto and auto.get("pending_count", 0) > 0:
+        blocks.append({
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [{"type": "text", "text": {"content": "🤖 Pending Automation"}}]
+            }
+        })
+
+        for req in auto.get("requests", [])[:5]:
+            blocks.append({
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [{"type": "text", "text": {
+                        "content": f"{req.get('name', 'Unnamed')}: {req.get('command', '')} {req.get('arguments', '')}"
+                    }}]
+                }
+            })
+
+    return blocks
+
+
+# =============================================================================
 # CLI Entry Point
 # =============================================================================
 
@@ -494,6 +748,7 @@ def main():
     parser.add_argument("--no-calendar", action="store_true", help="Skip calendar data")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--quiet", "-q", action="store_true", help="Minimal output")
+    parser.add_argument("--notion", action="store_true", help="Save briefing to Notion")
 
     args = parser.parse_args()
 
@@ -502,6 +757,17 @@ def main():
         include_financial=not args.no_financial,
         include_calendar=not args.no_calendar,
     )
+
+    # Save to Notion if requested
+    if args.notion:
+        result = save_briefing_to_notion(briefing=briefing)
+        if result.get("success"):
+            print(f"✅ Saved to Notion: {result.get('title')}")
+            print(f"   URL: {result.get('url')}")
+            print(f"   Summary: {result.get('summary')}")
+        else:
+            print(f"❌ Failed to save to Notion: {result.get('error')}")
+        return
 
     # Output
     if args.json:
