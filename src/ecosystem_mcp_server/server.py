@@ -17,7 +17,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -63,8 +63,13 @@ LAUNCHAGENTS = {
     "tax_watcher": "com.taxorganizer.watcher",
 }
 
-# Monarch session file
+# Monarch session file (legacy)
 MONARCH_SESSION = HOME / "Library/Application Support/monarch-mcp-server/mm_session.pickle"
+
+# Monarch health report file (new proactive monitoring)
+MONARCH_HEALTH_REPORT = HOME / ".monarch-mcp/health_report.json"
+MONARCH_SESSION_FILE = HOME / ".monarch-mcp/session.json"
+MONARCH_TOKEN_FILE = HOME / ".monarch-mcp/token"
 
 
 # =============================================================================
@@ -90,8 +95,50 @@ def init_database():
         )
     """)
 
+    # New table for Monarch health check history
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS monarch_health_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            status TEXT NOT NULL,
+            session_valid INTEGER,
+            session_age_days REAL,
+            api_reachable INTEGER,
+            error_message TEXT,
+            library_version TEXT,
+            update_available INTEGER
+        )
+    """)
+
     conn.commit()
     conn.close()
+
+
+def log_monarch_health_check(health_data: Dict[str, Any]) -> None:
+    """Log a Monarch health check to the database for trend analysis."""
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO monarch_health_checks
+            (timestamp, status, session_valid, session_age_days, api_reachable, error_message, library_version, update_available)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now().isoformat(),
+            health_data.get("status", "unknown"),
+            1 if health_data.get("session_valid") else 0,
+            health_data.get("session_age_days"),
+            1 if health_data.get("api_reachable") else 0,
+            health_data.get("error_message"),
+            health_data.get("library_version"),
+            1 if health_data.get("update_available") else 0,
+        ))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to log Monarch health check: {e}")
 
 
 def log_operation(tool_name: str, parameters: Dict, result: str, success: bool, duration_ms: int = 0):
@@ -276,7 +323,7 @@ def check_tax_organizer() -> Dict[str, Any]:
 
 
 def check_monarch_money() -> Dict[str, Any]:
-    """Check Monarch Money MCP Server status."""
+    """Check Monarch Money MCP Server status using health report file."""
     status = {
         "name": "Monarch Money",
         "icon": "💰",
@@ -285,22 +332,98 @@ def check_monarch_money() -> Dict[str, Any]:
         "attention": [],
     }
 
-    # Check session file
-    if MONARCH_SESSION.exists():
-        mtime = get_file_mtime(MONARCH_SESSION)
-        if mtime:
-            age_days = (datetime.now() - mtime).days
-            status["last_activity"] = mtime.isoformat()
-            status["details"].append(f"Session: {format_time_ago(mtime)}")
+    # First, try to read the health report file (proactive monitoring)
+    health_report = None
+    if MONARCH_HEALTH_REPORT.exists():
+        try:
+            with open(MONARCH_HEALTH_REPORT) as f:
+                health_report = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to read Monarch health report: {e}")
 
-            if age_days > 7:
-                status["status"] = "stale"
-                status["attention"].append("Session may need refresh (>7 days old)")
-            else:
-                status["status"] = "connected"
+    if health_report:
+        # Use the health report data (real API validation)
+        report_status = health_report.get("status", "unknown")
+        status["health_report"] = health_report
+
+        if report_status == "healthy":
+            status["status"] = "connected"
+            status["details"].append("API verified healthy")
+        elif report_status == "degraded":
+            status["status"] = "degraded"
+            if health_report.get("recommendation"):
+                status["attention"].append(health_report["recommendation"])
+        elif report_status == "unhealthy":
+            status["status"] = "unhealthy"
+            if health_report.get("error_message"):
+                status["details"].append(f"Error: {health_report['error_message']}")
+            if health_report.get("recommendation"):
+                status["attention"].append(health_report["recommendation"])
+        else:
+            status["status"] = "unknown"
+
+        # Add session age info
+        if health_report.get("session_age_days") is not None:
+            age_days = health_report["session_age_days"]
+            status["session_age_days"] = age_days
+            status["details"].append(f"Session age: {age_days:.1f} days")
+
+        # Add API reachability info
+        if health_report.get("api_reachable"):
+            status["details"].append("API reachable: Yes")
+        elif "api_reachable" in health_report:
+            status["details"].append("API reachable: No")
+
+        # Add library version info
+        if health_report.get("library_version"):
+            status["library_version"] = health_report["library_version"]
+        if health_report.get("update_available"):
+            status["attention"].append(
+                f"Library update available: {health_report.get('library_version')} → {health_report.get('latest_library_version')}"
+            )
+
+        # Record check time
+        if health_report.get("last_check"):
+            status["last_check"] = health_report["last_check"]
+
     else:
-        status["status"] = "not_authenticated"
-        status["attention"].append("Run login_setup.py to authenticate")
+        # Fallback to legacy session file check
+        has_session = MONARCH_SESSION_FILE.exists() or MONARCH_TOKEN_FILE.exists()
+
+        if has_session:
+            # Check session file modification time
+            session_file = MONARCH_SESSION_FILE if MONARCH_SESSION_FILE.exists() else MONARCH_TOKEN_FILE
+            mtime = get_file_mtime(session_file)
+            if mtime:
+                age_days = (datetime.now() - mtime).days
+                status["last_activity"] = mtime.isoformat()
+                status["details"].append(f"Session file: {format_time_ago(mtime)}")
+
+                if age_days > 14:
+                    status["status"] = "likely_expired"
+                    status["attention"].append("Session likely expired (>14 days old)")
+                elif age_days > 10:
+                    status["status"] = "stale"
+                    status["attention"].append("Session may need refresh (>10 days old)")
+                else:
+                    status["status"] = "unknown"
+                    status["details"].append("No health report - status unverified")
+        elif MONARCH_SESSION.exists():
+            # Legacy pickle session
+            mtime = get_file_mtime(MONARCH_SESSION)
+            if mtime:
+                age_days = (datetime.now() - mtime).days
+                status["last_activity"] = mtime.isoformat()
+                status["details"].append(f"Legacy session: {format_time_ago(mtime)}")
+
+                if age_days > 7:
+                    status["status"] = "stale"
+                    status["attention"].append("Session may need refresh (>7 days old)")
+                else:
+                    status["status"] = "connected"
+        else:
+            status["status"] = "not_authenticated"
+            status["attention"].append("Run login_setup.py to authenticate")
 
     return status
 
@@ -768,6 +891,180 @@ If session is stale, run: python ~/Documents/monarch-mcp-server/login_setup.py
     except Exception as e:
         error_msg = f"Error getting financial summary: {str(e)}"
         log_operation("get_financial_summary", params, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+@mcp.tool()
+def validate_monarch_connection() -> str:
+    """
+    Perform an on-demand validation of the Monarch Money connection.
+
+    This reads the health report from the Monarch MCP server and logs
+    the result for trend analysis. Use this to check if Monarch is
+    working without making API calls through the Monarch MCP server.
+
+    Returns:
+        Current health status with details.
+    """
+    start_time = datetime.now()
+
+    try:
+        # Read health report
+        if not MONARCH_HEALTH_REPORT.exists():
+            result = {
+                "status": "no_health_report",
+                "message": "No health report found. The Monarch MCP server may not have started yet.",
+                "recommendation": "Start the Monarch MCP server or run login_setup.py",
+            }
+            log_operation("validate_monarch_connection", {}, "no_health_report", False)
+            return json.dumps(result, indent=2)
+
+        with open(MONARCH_HEALTH_REPORT) as f:
+            health_data = json.load(f)
+
+        # Log to database for trend analysis
+        log_monarch_health_check(health_data)
+
+        # Build response
+        status = health_data.get("status", "unknown")
+        result = {
+            "status": status,
+            "session_valid": health_data.get("session_valid"),
+            "session_age_days": health_data.get("session_age_days"),
+            "api_reachable": health_data.get("api_reachable"),
+            "last_check": health_data.get("last_check"),
+        }
+
+        if health_data.get("error_message"):
+            result["error_message"] = health_data["error_message"]
+        if health_data.get("recommendation"):
+            result["recommendation"] = health_data["recommendation"]
+
+        # Library info
+        if health_data.get("library_version"):
+            result["library_version"] = health_data["library_version"]
+        if health_data.get("update_available"):
+            result["update_available"] = True
+            result["latest_version"] = health_data.get("latest_library_version")
+
+        # Add interpretation
+        if status == "healthy":
+            result["interpretation"] = "Monarch Money is working correctly"
+        elif status == "degraded":
+            result["interpretation"] = "Monarch Money is working but may need attention soon"
+        elif status == "unhealthy":
+            result["interpretation"] = "Monarch Money is not working - action required"
+        else:
+            result["interpretation"] = "Monarch Money status cannot be determined"
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("validate_monarch_connection", {}, status, status == "healthy", duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error validating Monarch connection: {str(e)}"
+        log_operation("validate_monarch_connection", {}, error_msg, False)
+        return json.dumps({"error": error_msg})
+
+
+@mcp.tool()
+def get_monarch_health_history(days: int = 7, limit: int = 50) -> str:
+    """
+    Get historical Monarch Money health check data for trend analysis.
+
+    Useful for identifying patterns in connection issues, session expiry,
+    and API availability over time.
+
+    Args:
+        days: Number of days of history to retrieve (default: 7)
+        limit: Maximum number of records to return (default: 50)
+
+    Returns:
+        Historical health check data with trend analysis.
+    """
+    start_time = datetime.now()
+    params = {"days": days, "limit": limit}
+
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        cursor = conn.cursor()
+
+        # Get recent health checks
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        cursor.execute("""
+            SELECT timestamp, status, session_valid, session_age_days, api_reachable, error_message, library_version, update_available
+            FROM monarch_health_checks
+            WHERE timestamp > ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (cutoff, limit))
+
+        rows = cursor.fetchall()
+        conn.close()
+
+        # Build history
+        history = []
+        for row in rows:
+            history.append({
+                "timestamp": row[0],
+                "status": row[1],
+                "session_valid": bool(row[2]),
+                "session_age_days": row[3],
+                "api_reachable": bool(row[4]),
+                "error_message": row[5],
+                "library_version": row[6],
+                "update_available": bool(row[7]),
+            })
+
+        # Calculate trend metrics
+        if history:
+            healthy_count = sum(1 for h in history if h["status"] == "healthy")
+            unhealthy_count = sum(1 for h in history if h["status"] == "unhealthy")
+            api_failures = sum(1 for h in history if not h["api_reachable"])
+
+            trend = {
+                "total_checks": len(history),
+                "healthy_count": healthy_count,
+                "unhealthy_count": unhealthy_count,
+                "api_failure_count": api_failures,
+                "health_rate": round(healthy_count / len(history) * 100, 1) if history else 0,
+                "api_success_rate": round((len(history) - api_failures) / len(history) * 100, 1) if history else 0,
+            }
+
+            # Identify patterns
+            if unhealthy_count > len(history) * 0.3:
+                trend["pattern"] = "frequent_issues"
+                trend["recommendation"] = "Consider re-authenticating or checking for library updates"
+            elif api_failures > len(history) * 0.2:
+                trend["pattern"] = "api_instability"
+                trend["recommendation"] = "API has been intermittently unreachable"
+            else:
+                trend["pattern"] = "stable"
+                trend["recommendation"] = None
+        else:
+            trend = {
+                "total_checks": 0,
+                "message": "No health check history available",
+            }
+
+        result = {
+            "period_days": days,
+            "trend": trend,
+            "history": history[:20],  # Return last 20 for readability
+        }
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation("get_monarch_health_history", params, f"{len(history)} records", True, duration_ms)
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error getting health history: {str(e)}"
+        log_operation("get_monarch_health_history", params, error_msg, False)
         return json.dumps({"error": error_msg})
 
 
