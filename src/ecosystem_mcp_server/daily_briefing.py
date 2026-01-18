@@ -156,16 +156,21 @@ def get_financial_summary() -> Dict[str, Any]:
             # Get recent cashflow
             today = datetime.now()
             start_of_month = today.replace(day=1).strftime("%Y-%m-%d")
-            cashflow_json = get_cashflow(start_date=start_of_month)
+            end_of_today = today.strftime("%Y-%m-%d")
+            cashflow_json = get_cashflow(start_date=start_of_month, end_date=end_of_today)
             cashflow = json.loads(cashflow_json) if not cashflow_json.startswith("Error") else {}
+
+            # Extract summary - API returns summary as a list with nested summary dict
+            summary_list = cashflow.get("summary", [])
+            summary = summary_list[0].get("summary", {}) if summary_list else {}
 
             return {
                 "account_count": len([a for a in accounts if a.get("is_active", True)]),
                 "totals_by_type": totals,
                 "net_worth": sum(totals.values()),
-                "mtd_income": cashflow.get("summary", {}).get("sumIncome", 0),
-                "mtd_expenses": cashflow.get("summary", {}).get("sumExpense", 0),
-                "mtd_savings": cashflow.get("summary", {}).get("savings", 0),
+                "mtd_income": summary.get("sumIncome", 0),
+                "mtd_expenses": summary.get("sumExpense", 0),
+                "mtd_savings": summary.get("savings", 0),
             }
         else:
             return {"error": "Could not parse accounts", "raw": accounts_json[:200]}
