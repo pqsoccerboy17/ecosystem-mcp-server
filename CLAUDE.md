@@ -32,6 +32,9 @@ sqlite3 ~/Library/Application\ Support/ecosystem-mcp-server/history.db "SELECT *
 src/ecosystem_mcp_server/
 ├── __init__.py
 ├── server.py           # Main MCP server with all tools
+├── monarch_sync.py     # Monarch → Notion transaction sync module
+├── daily_briefing.py   # Daily briefing generation
+├── notion_control.py   # Notion automation request polling
 └── (future modules as needed)
 ```
 
@@ -58,10 +61,11 @@ CREATE TABLE operations (
 ## Wrapped Components
 | Component | Location | What It Does |
 |-----------|----------|--------------|
-| downloads-organizer | ~/Documents/downloads-organizer | PDF + media organization |
-| treehouse-context-sync | ~/Documents/treehouse-context-sync | Notion → repo sync |
-| notion-rules | ~/Documents/notion-rules | Tax document OCR |
-| monarch-mcp-server | ~/Documents/monarch-mcp-server | Financial data |
+| downloads-organizer | ~/dev/automation/downloads-organizer | PDF + media organization |
+| treehouse-context-sync | ~/dev/notion/treehouse-context-sync | Notion → repo sync |
+| notion-rules | ~/dev/notion/notion-rules | Tax document OCR |
+| monarch-mcp-server | ~/dev/automation/monarch-mcp-server | Financial data |
+| monarch_sync | (internal module) | Monarch → Notion transaction sync |
 
 ## Development Workflow
 1. **Understand** - Explain what needs to be done

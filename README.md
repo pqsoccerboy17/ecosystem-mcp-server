@@ -24,6 +24,7 @@ This MCP server wraps and orchestrates all personal automation tools:
 | `search_documents(query)` | Search across Notion databases |
 | `get_automation_history()` | Recent operations and results |
 | `run_reconciliation()` | Verify all systems in sync |
+| `sync_monarch_to_notion(days, dry_run)` | Sync Monarch transactions to Notion |
 
 ## Installation
 
@@ -61,10 +62,21 @@ ecosystem-mcp-server
 ├── Wraps: treehouse-context-sync
 ├── Wraps: notion-rules (tax OCR)
 ├── Wraps: monarch-mcp-server (financial)
+├── Wraps: monarch_sync (Monarch → Notion transactions)
 └── Logs: SQLite history database
 ```
 
 All operations are logged to `~/Library/Application Support/ecosystem-mcp-server/history.db` for tracking and debugging.
+
+### Monarch → Notion Sync
+
+The `sync_monarch_to_notion` tool syncs transactions from Monarch Money to the Treehouse Transactions Notion database:
+
+- Pulls transactions for configurable date range (default: 7 days)
+- Maps Monarch categories to Notion schema
+- Deduplicates based on Monarch transaction ID
+- Uses account tags (TH/PERS) for entity classification
+- Supports dry-run mode for testing
 
 ## Example Usage
 
