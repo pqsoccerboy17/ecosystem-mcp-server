@@ -45,6 +45,10 @@ REPOS = {
     "monarch_mcp": DOCUMENTS / "monarch-mcp-server",
     "context_sync": DOCUMENTS / "treehouse-context-sync",
     "notion_rules": DOCUMENTS / "notion-rules",
+    # New integrations (Jan 2026)
+    "notebooklm_mcp": HOME / "dev/tools/notebooklm-mcp",
+    "ai_code_connect": HOME / "dev/tools/ai-code-connect",
+    "google_workspace_mcp": HOME / "dev/automation/google-workspace-mcp",
 }
 
 # Log files
@@ -507,6 +511,135 @@ def check_notion_rules() -> Dict[str, Any]:
 
 
 # =============================================================================
+# New Tool Status Checks (Jan 2026)
+# =============================================================================
+
+def check_notebooklm() -> Dict[str, Any]:
+    """Check NotebookLM MCP status."""
+    status = {
+        "name": "NotebookLM",
+        "icon": "📓",
+        "status": "unknown",
+        "details": [],
+        "attention": [],
+    }
+
+    auth_file = HOME / ".notebooklm-mcp/auth.json"
+    repo = REPOS.get("notebooklm_mcp")
+
+    if repo and repo.exists():
+        status["details"].append(f"Location: {repo}")
+        if auth_file.exists():
+            status["status"] = "authenticated"
+            mtime = get_file_mtime(auth_file)
+            if mtime:
+                status["details"].append(f"Auth: {format_time_ago(mtime)}")
+        else:
+            status["status"] = "not_authenticated"
+            status["attention"].append("Run 'uv run notebooklm-mcp auth' to authenticate")
+    else:
+        status["status"] = "not_installed"
+        status["details"].append("Repository not found")
+
+    return status
+
+
+def check_google_workspace() -> Dict[str, Any]:
+    """Check Google Workspace MCP status."""
+    status = {
+        "name": "Google Workspace",
+        "icon": "📧",
+        "status": "unknown",
+        "details": [],
+        "attention": [],
+    }
+
+    token_file = HOME / ".config/g-workspace-mcp/token.json"
+    repo = REPOS.get("google_workspace_mcp")
+
+    if repo and repo.exists():
+        status["details"].append(f"Location: {repo}")
+        status["details"].append("Mode: read-only")
+        if token_file.exists():
+            status["status"] = "connected"
+            mtime = get_file_mtime(token_file)
+            if mtime:
+                status["details"].append(f"Token: {format_time_ago(mtime)}")
+        else:
+            status["status"] = "not_authenticated"
+            status["attention"].append("Run OAuth setup to connect Google account")
+    else:
+        status["status"] = "not_installed"
+        status["details"].append("Repository not found")
+
+    return status
+
+
+def check_ai_code_connect() -> Dict[str, Any]:
+    """Check ai-code-connect status."""
+    import shutil
+
+    status = {
+        "name": "AI Code Connect",
+        "icon": "🔄",
+        "status": "unknown",
+        "details": [],
+        "attention": [],
+    }
+
+    repo = REPOS.get("ai_code_connect")
+    gemini_available = shutil.which("gemini") is not None
+
+    if repo and repo.exists():
+        status["details"].append(f"Location: {repo}")
+
+        if gemini_available:
+            status["status"] = "ready"
+            status["details"].append("Gemini CLI: installed")
+        else:
+            status["status"] = "gemini_missing"
+            status["attention"].append("Install Gemini CLI: brew install gemini-cli")
+    else:
+        status["status"] = "not_installed"
+        status["details"].append("Repository not found")
+
+    return status
+
+
+def check_statusline() -> Dict[str, Any]:
+    """Check Claude Code statusline configuration."""
+    status = {
+        "name": "Statusline",
+        "icon": "📊",
+        "status": "unknown",
+        "details": [],
+        "attention": [],
+    }
+
+    script_path = HOME / ".claude/statusline-command.sh"
+    settings_path = HOME / ".claude/settings.json"
+
+    if script_path.exists():
+        status["status"] = "configured"
+        status["details"].append("Script installed")
+
+        # Check if configured in settings
+        if settings_path.exists():
+            try:
+                with open(settings_path) as f:
+                    settings = json.load(f)
+                    if "statusLine" in settings:
+                        status["details"].append("Enabled in settings.json")
+            except Exception:
+                pass
+    else:
+        status["status"] = "not_configured"
+        status["attention"].append("Install statusline script to ~/.claude/")
+
+    return status
+
+
+# =============================================================================
 # MCP Tools
 # =============================================================================
 
@@ -521,19 +654,28 @@ def get_ecosystem_status() -> str:
     - Monarch Money connection
     - Treehouse Context Sync
     - Notion Rules (Tax OCR)
+    - NotebookLM MCP (NEW)
+    - Google Workspace MCP (NEW)
+    - AI Code Connect (NEW)
+    - Claude Code Statusline (NEW)
 
     Also reports pending files and attention items.
     """
     start_time = datetime.now()
 
     try:
-        # Collect all statuses
+        # Collect all statuses (original + new tools)
         checks = [
             check_downloads_organizer(),
             check_tax_organizer(),
             check_monarch_money(),
             check_context_sync(),
             check_notion_rules(),
+            # New tools (Jan 2026)
+            check_notebooklm(),
+            check_google_workspace(),
+            check_ai_code_connect(),
+            check_statusline(),
         ]
 
         # Build result
@@ -1412,6 +1554,56 @@ def get_daily_briefing(include_financial: bool = True, include_calendar: bool = 
         error_msg = f"Error generating briefing: {str(e)}"
         log_operation("get_daily_briefing", params, error_msg, False)
         return json.dumps({"error": error_msg})
+
+
+# =============================================================================
+# Monarch → Notion Sync
+# =============================================================================
+
+@mcp.tool()
+def sync_monarch_to_notion(days: int = 7, dry_run: bool = False) -> str:
+    """
+    Sync transactions from Monarch Money to Notion.
+
+    Pulls recent transactions and creates entries in the Treehouse Transactions database.
+    Automatically skips duplicates based on Monarch transaction ID.
+
+    Args:
+        days: Number of days to sync (default: 7)
+        dry_run: If True, preview changes without creating Notion pages
+
+    Returns:
+        JSON with sync summary: synced count, skipped duplicates, errors
+    """
+    import asyncio
+    start_time = datetime.now()
+    params = {"days": days, "dry_run": dry_run}
+
+    try:
+        from . import monarch_sync
+
+        # Run the async sync function
+        result = asyncio.run(monarch_sync.sync_transactions(
+            days=days,
+            dry_run=dry_run
+        ))
+
+        # Log operation
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+        log_operation(
+            "sync_monarch_to_notion",
+            params,
+            result.get("summary", ""),
+            result.get("success", False),
+            duration_ms
+        )
+
+        return json.dumps(result, indent=2, default=str)
+
+    except Exception as e:
+        error_msg = f"Error syncing Monarch to Notion: {str(e)}"
+        log_operation("sync_monarch_to_notion", params, error_msg, False)
+        return json.dumps({"error": error_msg, "success": False})
 
 
 # =============================================================================
