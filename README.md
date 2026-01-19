@@ -26,6 +26,12 @@ This MCP server wraps and orchestrates all personal automation tools:
 | `run_reconciliation()` | Verify all systems in sync |
 | `sync_monarch_to_notion(days, dry_run)` | Sync Monarch transactions to Notion |
 
+## External Integrations
+
+| Integration | Purpose | Status |
+|-------------|---------|--------|
+| OpenBB | Financial market data (stocks, crypto, forex) | Installed |
+
 ## Installation
 
 ```bash

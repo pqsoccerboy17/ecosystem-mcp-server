@@ -66,6 +66,7 @@ CREATE TABLE operations (
 | notion-rules | ~/dev/notion/notion-rules | Tax document OCR |
 | monarch-mcp-server | ~/dev/automation/monarch-mcp-server | Financial data |
 | monarch_sync | (internal module) | Monarch → Notion transaction sync |
+| openbb | ~/dev/tools/openbb | Financial market data SDK |
 
 ## Development Workflow
 1. **Understand** - Explain what needs to be done

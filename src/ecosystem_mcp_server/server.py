@@ -49,6 +49,7 @@ REPOS = {
     "notebooklm_mcp": HOME / "dev/tools/notebooklm-mcp",
     "ai_code_connect": HOME / "dev/tools/ai-code-connect",
     "google_workspace_mcp": HOME / "dev/automation/google-workspace-mcp",
+    "openbb": HOME / "dev/tools/openbb",
 }
 
 # Log files
@@ -639,6 +640,35 @@ def check_statusline() -> Dict[str, Any]:
     return status
 
 
+def check_openbb() -> Dict[str, Any]:
+    """Check OpenBB financial data platform status."""
+    status = {
+        "name": "OpenBB",
+        "icon": "📈",
+        "status": "unknown",
+        "details": [],
+        "attention": [],
+    }
+
+    repo = REPOS.get("openbb")
+    if repo and repo.exists():
+        status["details"].append(f"Location: {repo}")
+
+    try:
+        from openbb import obb
+        status["status"] = "installed"
+        status["details"].append("OpenBB SDK available")
+        status["details"].append("Ready for market data queries")
+    except ImportError:
+        status["status"] = "not_installed"
+        status["attention"].append("Run: pip install openbb")
+    except Exception as e:
+        status["status"] = "error"
+        status["attention"].append(f"Error: {str(e)}")
+
+    return status
+
+
 # =============================================================================
 # MCP Tools
 # =============================================================================
@@ -676,6 +706,7 @@ def get_ecosystem_status() -> str:
             check_google_workspace(),
             check_ai_code_connect(),
             check_statusline(),
+            check_openbb(),
         ]
 
         # Build result
